@@ -1,0 +1,15 @@
+[Unit]
+Description=Restart PipeWire audio stack after resume from suspend
+After=systemd-suspend.service
+After=systemd-hibernate.service
+After=systemd-suspend-then-hibernate.service
+After=nvidia-resume.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/systemd/system-sleep/fix-audio-resume.sh
+
+[Install]
+WantedBy=systemd-suspend.service
+WantedBy=systemd-hibernate.service
+WantedBy=systemd-suspend-then-hibernate.service

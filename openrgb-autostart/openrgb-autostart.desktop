@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OpenRGB
+Comment=Start OpenRGB minimized with delayed profile loading
+Exec=$HOME/.local/bin/openrgb-autostart.sh
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+StartupNotify=false
