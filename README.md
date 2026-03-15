@@ -14,7 +14,7 @@ Fixes for common Linux desktop issues on KDE Plasma / Kubuntu systems with NVIDI
   - [Configuration](#configuration)
   - [How It Works](#how-it-works)
   - [Troubleshooting](#troubleshooting-openrgb)
-- [Fix 2: PipeWire Audio Restore After Suspend/Resume](#fix-2-pipewire-audio-restore-after-suspendresume)
+- [Fix 2: Suspend/Resume Fix (Audio + OpenRGB)](#fix-2-suspendresume-fix-audio--openrgb)
   - [The Problem](#the-problem-1)
   - [Root Cause](#root-cause-1)
   - [The Solution](#the-solution-1)
@@ -211,13 +211,16 @@ PROFILE_DELAY=10 # Was 5
 
 ---
 
-## Fix 2: PipeWire Audio Restore After Suspend/Resume
+## Fix 2: Suspend/Resume Fix (Audio + OpenRGB)
 
 ### The Problem
 
-After resuming from **suspend** (sleep) or **hibernate**, audio output stops working entirely. No sound from any application, even though the system tray shows audio devices as connected and volume is not muted.
+After resuming from **suspend** (sleep) or **hibernate**:
 
-A manual reboot or a `systemctl --user restart pipewire` fixes the issue every time.
+1. **Audio**: USB audio devices stop working. No sound output, even though the system tray shows devices as connected and volume is not muted.
+2. **OpenRGB**: RGB lighting reverts to default colors — the saved profile is lost.
+
+A manual `systemctl --user restart wireplumber` fixes audio; manually running `openrgb --profile "meins"` fixes RGB.
 
 ### Root Cause
 
@@ -245,13 +248,18 @@ After Resume:
 
 ### The Solution
 
-A systemd service that automatically restarts the PipeWire audio stack for all active user sessions after resume.
+A systemd service that automatically:
+
+1. **Restarts WirePlumber** (only the session manager, not the full PipeWire stack) — this re-detects USB audio devices while keeping existing audio streams alive
+2. **Reloads the OpenRGB profile** — restores RGB lighting to the saved configuration
+
+> **Why WirePlumber-only?** Apps using `pa_simple` (e.g., Minecraft Bedrock via mcpelauncher) cannot automatically reconnect to PipeWire. A full PipeWire restart would break their audio until the app is restarted. WirePlumber-only restart preserves all existing streams while fixing USB device routing.
 
 #### Files
 
 | File | Purpose | Install Location |
 |------|---------|------------------|
-| `fix-audio-resume.sh` | Script to restart PipeWire for all users | `/usr/lib/systemd/system-sleep/` |
+| `fix-audio-resume.sh` | Restart WirePlumber + reload OpenRGB profile | `/usr/lib/systemd/system-sleep/` |
 | `fix-audio-resume.service` | systemd unit (runs after resume) | `/etc/systemd/system/` |
 
 ### Installation
@@ -289,37 +297,39 @@ systemd runs resume services in order:
   │ ┌──────────────────────────────────────────────────────────┐
   │ │ fix-audio-resume.sh                                      │
   │ │                                                          │
+  │ │ Phase 1: Audio Fix                                       │
   │ │ 1. sleep 3                                               │
   │ │    └─ Wait for USB devices to re-enumerate               │
   │ │                                                          │
-  │ │ 2. loginctl list-sessions                                │
-  │ │    └─ Find all active user sessions                      │
+  │ │ 2. For each session with PipeWire socket:                │
+  │ │    └─ Restart WirePlumber ONLY (not full PipeWire)       │
+  │ │    └─ Existing audio streams stay alive ✓                │
+  │ │    └─ USB devices re-detected ✓                          │
+  │ │    └─ sleep 2 (let WirePlumber settle)                   │
   │ │                                                          │
-  │ │ 3. For each session with PipeWire socket:                │
-  │ │    └─ Check /run/user/$UID/pipewire-0 exists             │
-  │ │    └─ runuser -u $USER systemctl --user restart:         │
-  │ │       ├─ pipewire.service                                │
-  │ │       ├─ wireplumber.service                             │
-  │ │       ├─ pipewire-pulse.service                          │
-  │ │       └─ filter-chain.service                            │
-  │ │    └─ Log to syslog via logger                           │
+  │ │ Phase 2: OpenRGB Fix                                     │
+  │ │ 3. sleep 5                                               │
+  │ │    └─ Wait for USB RGB controllers to re-enumerate       │
   │ │                                                          │
-  │ │ Result: Fresh PipeWire → picks up re-enumerated          │
-  │ │         USB devices → audio works ✓                      │
+  │ │ 4. For each session running OpenRGB:                     │
+  │ │    └─ flatpak run openrgb --profile "meins"              │
+  │ │    └─ RGB lighting restored ✓                            │
   │ └──────────────────────────────────────────────────────────┘
   │
   ▼
-Desktop session: audio fully functional
+Desktop session: audio + RGB fully functional
 ```
 
-#### Why Restart All Four Services?
+#### Why Only WirePlumber (Not the Full Stack)?
 
-| Service | Role | Why Restart? |
-|---------|------|-------------|
-| `pipewire.service` | Core audio/video server | Holds stale device references |
-| `wireplumber.service` | Session/policy manager | Routes audio to stale devices |
-| `pipewire-pulse.service` | PulseAudio compatibility layer | Caches device list from PipeWire |
-| `filter-chain.service` | DSP/effects chain | May hold open file descriptors to old devices |
+| Service | Role | Restart Needed? |
+|---------|------|----------------|
+| `wireplumber.service` | Session/policy manager, device routing | **Yes** — holds stale USB device references |
+| `pipewire.service` | Core audio/video server | **No** — streams survive if WirePlumber reconnects devices |
+| `pipewire-pulse.service` | PulseAudio compatibility layer | **No** — automatically picks up WirePlumber changes |
+| `filter-chain.service` | DSP/effects chain | **No** — no direct USB device references |
+
+Restarting only WirePlumber is crucial for apps that use `pa_simple` (PulseAudio Simple API), like **Minecraft Bedrock** via mcpelauncher. These apps establish a one-shot audio connection and cannot automatically reconnect if PipeWire itself restarts. A WirePlumber-only restart re-routes USB devices without dropping any existing audio streams.
 
 #### Why `runuser` Instead of `sudo -u`?
 
@@ -341,8 +351,10 @@ systemctl suspend
 journalctl -u fix-audio-resume.service --no-pager -n 20
 
 # Expected output:
-# fix-audio-resume: Restarting PipeWire for <username> (UID 1000)
-# fix-audio-resume: PipeWire restart complete for <username>
+# fix-audio-resume: Restarting WirePlumber for <username> (UID 1000)
+# fix-audio-resume: WirePlumber restart complete for <username>
+# fix-audio-resume: Reloading OpenRGB profile for <username> (UID 1000)
+# fix-audio-resume: OpenRGB profile reload complete for <username>
 
 # 3. Also check syslog
 journalctl -t fix-audio-resume --no-pager -n 10
@@ -359,15 +371,32 @@ speaker-test -t sine -f 440 -l 1
 # Check if the service ran
 systemctl status fix-audio-resume.service
 
-# Check if PipeWire is running
-systemctl --user status pipewire.service
+# Check if WirePlumber is running
+systemctl --user status wireplumber.service
 
-# Manual restart (immediate fix)
+# Manual restart (immediate fix — WirePlumber only)
+systemctl --user restart wireplumber.service
+
+# If WirePlumber-only restart doesn't fix it, try the full stack
+# (note: this will break audio for Minecraft and similar pa_simple apps)
 systemctl --user restart pipewire.service wireplumber.service \
     pipewire-pulse.service filter-chain.service
 
 # If manual restart works but automatic doesn't, increase the sleep delay
 sudo sed -i 's/sleep 3/sleep 5/' /usr/lib/systemd/system-sleep/fix-audio-resume.sh
+```
+
+#### OpenRGB profile not restored after resume
+
+```bash
+# Check if OpenRGB is still running
+pgrep -af openrgb
+
+# Manually reload the profile
+flatpak run org.openrgb.OpenRGB --profile "meins"
+
+# Check logs for OpenRGB reload
+journalctl -t fix-audio-resume --no-pager | grep -i openrgb
 ```
 
 #### Service not running after resume
